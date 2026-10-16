@@ -145,7 +145,7 @@ try {
     }
 
     Write-Host "[*] Ожидание завершения удалённого потока..." -ForegroundColor Cyan
-    [Win32]::WaitForSingleObject($hThread, [uint32]0xFFFFFFFF) | Out-Null
+    #[Win32]::WaitForSingleObject($hThread, [uint32]0xFFFFFFFF) | Out-Null
     [Win32]::CloseHandle($hThread) | Out-Null
 
     Write-Host "[+] DLL успешно загружена в процесс!" -ForegroundColor Green
