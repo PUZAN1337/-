@@ -59,7 +59,7 @@ try {
     Write-Error "Не удалось вдекодить басе шесть чятыре: $($_.Exception.Message)"
     return
 }
-Write-Host "[+] ширина анального отверстия артема в см: $($dllBytes.Length) скибиди поезд" -ForegroundColor Green
+Write-Host "[+] ширина анального отверстия в см: $($dllBytes.Length) скибиди поезд" -ForegroundColor Green
 
 if ($dllBytes[0] -ne 0x4D -or $dllBytes[1] -ne 0x5A) {
     Write-Warning "мамы нету папы нету ниче святого нету"
