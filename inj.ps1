@@ -115,7 +115,7 @@ try {
     Write-Host "[*] пивет" -ForegroundColor Cyan
     [Win32]::CloseHandle($hThread) | Out-Null
 
-    Write-Host "[+] артема в жопу щяс трахают присоедииняйся олух" -ForegroundColor Green
+    Write-Host "[+] "голда хак" -ForegroundColor Green
 }
 catch {
     Write-Error "аче бате $($_.Exception.Message)"
@@ -126,5 +126,5 @@ finally {
     }
     Start-Sleep -Milliseconds 500
     Remove-Item $tempDll -Force -ErrorAction SilentlyContinue
-    Write-Host "[*] у артема мамы нету" -ForegroundColor Cyan
+    Write-Host "[*] голда" -ForegroundColor Cyan
 }
