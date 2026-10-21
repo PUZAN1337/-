@@ -68,7 +68,7 @@ if ($dllBytes[0] -ne 0x4D -or $dllBytes[1] -ne 0x5A) {
 $targetProcess = Get-Process -Name $TargetProcessName -ErrorAction SilentlyContinue | Select-Object -First 1
 
 if (-not $targetProcess) {
-    Write-Host "[!] Процесс не найден. Все процессы, содержащие 'rust':" -ForegroundColor Yellow
+    Write-Host "[!] Процесс не найден" -ForegroundColor Yellow
     Get-Process | Where-Object { $_.ProcessName -like '*rust*' } |
         Format-Table Id, ProcessName, Path -AutoSize
     return
@@ -103,13 +103,13 @@ try {
     $kernel32 = [Win32]::GetModuleHandle("kernel32.dll")
     $loadLibAddr = [Win32]::GetProcAddress($kernel32, "LoadLibraryA")
     if ($loadLibAddr -eq [IntPtr]::Zero) {
-        throw "Не удалось получить адрес LoadLibraryA"
+        throw "LoadLibraryA"
     }
 
     $hThread = [Win32]::CreateRemoteThread($hProcess, [IntPtr]::Zero, 0, $loadLibAddr, $remoteMem, 0, [IntPtr]::Zero)
     if ($hThread -eq [IntPtr]::Zero) {
         $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "CreateRemoteThread вернул NULL. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
+        throw "CreateRemoteThread. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
     }
 
     Write-Host "[*] пивет" -ForegroundColor Cyan
