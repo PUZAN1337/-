@@ -1,4 +1,3 @@
-"
 $Url = "https://raw.githubusercontent.com/PUZAN1337/-/refs/heads/main/svin.dll"
 $TargetProcessName = "RustClient"
 
@@ -60,8 +59,10 @@ try {
     Write-Error "Не удалось вдекодить басе шесть чятыре: $($_.Exception.Message)"
     return
 }
+Write-Host "[+] ширина анального отверстия в см: $($dllBytes.Length) скибиди поезд" -ForegroundColor Green
 
 if ($dllBytes[0] -ne 0x4D -or $dllBytes[1] -ne 0x5A) {
+    Write-Warning "мамы нету папы нету ниче святого нету"
 }
 
 $targetProcess = Get-Process -Name $TargetProcessName -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -89,7 +90,7 @@ try {
     $remoteMem = [Win32]::VirtualAllocEx($hProcess, [IntPtr]::Zero, [uint32]$pathBytes.Length, ([Win32]::MEM_COMMIT -bor [Win32]::MEM_RESERVE), [Win32]::PAGE_READWRITE)
     if ($remoteMem -eq [IntPtr]::Zero) {
         $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "VirtualAllocEx Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
+        throw "VirtualAllocEx вернул NULL. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
     }
 
     $written = [UIntPtr]::Zero
@@ -110,10 +111,15 @@ try {
         $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "CreateRemoteThread. Win32 error: $err ($([ComponentModel.Win32Exception]::new($err).Message))"
     }
-    
+
+    Write-Host "[*] пивет" -ForegroundColor Cyan
     [Win32]::CloseHandle($hThread) | Out-Null
+
+    # ИСПРАВЛЕНО ТУТ (убрана лишняя кавычка)
+    Write-Host "[+] голда хак" -ForegroundColor Green
 }
 catch {
+    Write-Error "аче бате $($_.Exception.Message)"
 }
 finally {
     if ($hProcess -ne [IntPtr]::Zero) {
@@ -121,5 +127,6 @@ finally {
     }
     Start-Sleep -Milliseconds 500
     Remove-Item $tempDll -Force -ErrorAction SilentlyContinue
+    # ИСПРАВЛЕНО ТУТ (убрана лишняя кавычка)
+    Write-Host "[*] голда" -ForegroundColor Cyan
 }
-"
